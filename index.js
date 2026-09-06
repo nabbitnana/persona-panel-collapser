@@ -1,29 +1,28 @@
 // 人设面板折叠控制 - 适用于 TauriTavern / SillyTavern
-// 在"用户设定管理"抽屉里加三/四个按钮，可以单独折叠/展开：
-//   - 用户设定管理（人设列表）
-//   - 当前人设（详情/描述编辑区）
+// 在"用户设定管理"抽屉里加几个按钮，可以单独折叠/展开：
+//   - 用户设定管理（人设列表，#user_avatar_block）
+//   - 当前人设（详情/描述编辑区，围绕 #persona_description 的那一块）
 //   - 全部折叠 / 全部展开
 // 状态会存在 localStorage，下次打开面板时记住上次的折叠状态。
+//
+// 选择器依据（已对照 SillyTavern 官方源码 public/scripts/personas.js 核实）：
+//   - 抽屉本体：document.querySelector('#persona-management-button .drawer-content')
+//     （源码里 isPersonaPanelOpen() 就是用这个选择器判断面板是否打开的）
+//   - 人设列表：#user_avatar_block（源码里 getUserAvatarBlock()/getUserAvatars() 都是
+//     $('#user_avatar_block').append(...) / $(listId) 操作这个元素）
+//   - "当前人设"没有单独的包裹容器，是散落的一批元素（#persona_description、#your_name、
+//     #persona_connections_list 等）。所以这里改用"结构关系"定位：从确定存在的
+//     #persona_description 往上找父节点，直到找到一个和 #user_avatar_block 同级
+//     （父节点相同）的祖先，那就是"当前人设"整块区域。
 
 (function () {
     'use strict';
 
     const STORAGE_KEY = 'ppc_persona_panel_state_v1';
     const TOOLBAR_ID = 'ppc-toolbar';
-
-    // 依次尝试这些 id / 关键字，兼容不同版本可能的差异。
-    // 如果你的版本元素不是这些 id，请用浏览器"检查元素"确认真实 id，
-    // 然后把它加进对应数组的第一位即可。
-    const LIST_CANDIDATES = {
-        ids: ['user_avatar_block', 'rm_print_personas_block', 'persona_list_block'],
-        text: ['用户设定管理', 'Manage personas', 'Persona Management']
-    };
-    const CURRENT_CANDIDATES = {
-        ids: ['persona_description_block', 'current_persona_block'],
-        text: ['当前人设', 'Current Persona']
-    };
-    // 抽屉本体（智慧表情图标点开的那个面板）
-    const DRAWER_IDS = ['user-settings-block', 'persona-management-block'];
+    const DRAWER_SELECTOR = '#persona-management-button .drawer-content';
+    const LIST_ID = 'user_avatar_block';
+    const CURRENT_ANCHOR_ID = 'persona_description';
 
     function getState() {
         try {
@@ -38,40 +37,28 @@
     }
 
     function findDrawer() {
-        for (const id of DRAWER_IDS) {
-            const el = document.getElementById(id);
-            if (el) return el;
-        }
-        return null;
+        return document.querySelector(DRAWER_SELECTOR);
     }
 
-    // 在 root 范围内，优先按 id 找；找不到就按标题文字模糊匹配，
-    // 返回该标题所在的、看起来像"一个区块"的祖先节点。
-    function findBlock(root, candidates) {
-        for (const id of candidates.ids) {
-            const el = document.getElementById(id);
-            if (el) return el;
+    // 从 target 往上爬，直到找到一个跟 referenceSibling 同一个父节点的祖先节点，
+    // 也就是跟 referenceSibling 处于"同一层级/同一个区块"的容器。
+    function climbToSiblingLevel(target, referenceSibling) {
+        if (!target || !referenceSibling || !referenceSibling.parentElement) return null;
+        let node = target;
+        const targetParent = referenceSibling.parentElement;
+        let hops = 0;
+        while (node && node.parentElement !== targetParent && hops < 20) {
+            node = node.parentElement;
+            hops++;
         }
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-        let node;
-        while ((node = walker.nextNode())) {
-            const text = (node.childNodes.length && node.childNodes[0].nodeType === 3)
-                ? node.textContent.trim()
-                : '';
-            if (!text || text.length > 30) continue;
-            if (candidates.text.some(t => text.indexOf(t) === 0)) {
-                // 往上找一个体积明显更大的容器作为"区块"
-                let container = node.parentElement;
-                let hops = 0;
-                while (container && container.parentElement && hops < 3 &&
-                    container.parentElement !== root) {
-                    container = container.parentElement;
-                    hops++;
-                }
-                return container || node;
-            }
-        }
-        return null;
+        return node && node.parentElement === targetParent ? node : null;
+    }
+
+    function findBlocks() {
+        const listBlock = document.getElementById(LIST_ID);
+        const anchor = document.getElementById(CURRENT_ANCHOR_ID);
+        const currentBlock = listBlock && anchor ? climbToSiblingLevel(anchor, listBlock) : null;
+        return { listBlock, currentBlock };
     }
 
     function applyCollapse(el, collapsed) {
@@ -80,8 +67,7 @@
     }
 
     function refresh(drawer, state) {
-        const listBlock = findBlock(drawer, LIST_CANDIDATES);
-        const currentBlock = findBlock(drawer, CURRENT_CANDIDATES);
+        const { listBlock, currentBlock } = findBlocks();
         applyCollapse(listBlock, !state.list);
         applyCollapse(currentBlock, !state.current);
         return { listBlock, currentBlock };
