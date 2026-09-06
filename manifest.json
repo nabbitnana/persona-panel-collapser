@@ -1,0 +1,12 @@
+{
+    "display_name": "人设面板折叠控制",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "you",
+    "version": "1.0.0",
+    "homePage": "",
+    "auto_update": false
+}
