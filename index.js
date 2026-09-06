@@ -3,30 +3,30 @@
 //   - User列表（人设列表，#user_avatar_block）—— 默认展开
 //   - 用户设定描述（"当前人设"里的描述文本框那一块）—— 默认折叠
 //   - 插入位置（描述下面的插入位置下拉框那一块）—— 默认折叠
-//   - 全局设置（插入位置之后剩下的全部内容：链接/排序位置/人设标签/角色分组等）—— 默认折叠
+//   - 全局设置（切换通知/多重绑定/自动绑定 等开关那一块）—— 默认折叠
 // 状态存 localStorage，下次打开面板记住上次状态。
 //
-// 定位方式说明：
-//   - 人设列表用确定存在的 id：#user_avatar_block（源码 getUserAvatarBlock/getUserAvatars 用的就是它）。
-//   - "当前人设"下面的字段在源码里是散落的，没有统一容器，所以改成按可见标题文字（"用户设定描述"
-//     "插入位置"）定位，再往上爬到跟 #user_avatar_block 同级的祖先节点，得到对应的整块区域。
-//   - "全局设置"不逐个再猜"链接/排序位置/人设标签/..."的选择器，而是取"插入位置"区块之后、
-//     同一层级里剩下的全部兄弟节点，打包成一组统一折叠/展开，这样底下具体有几块都不用管。
-//
-// 如果某个按钮点了没反应，大概率是对应的标题文字/结构和这里假设的不一致，
-// 把审查元素看到的真实结构截图发出来，再调整 HEADING_LABELS 或定位逻辑即可。
+// v3 改动说明（修复宽屏两栏布局下三个新按钮完全不生效的问题）：
+//   上一版用"往上爬直到跟 #user_avatar_block 同一个父节点"来找区块，这在窄屏单栏布局下
+//   凑巧能用，但宽屏下"用户设定管理"和"当前人设"是左右两栏，两边压根不在同一条祖先链上，
+//   爬到 20 层都碰不到同一个父节点，直接返回 null，按钮自然没反应。
+//   现在换成完全不依赖布局结构的办法：从标题文字所在的元素开始往上爬，每爬一层就检查
+//   这一层里是否已经包含真正的控件（textarea / select / input / button），
+//   一旦包含就停下来，返回这一层作为"区块"。这样无论是单栏还是两栏、
+//   无论标题和内容隔了几层 div，都能定位到正确的范围。
 
 (function () {
     'use strict';
 
-    const STORAGE_KEY = 'ppc_persona_panel_state_v2';
+    const STORAGE_KEY = 'ppc_persona_panel_state_v3';
     const TOOLBAR_ID = 'ppc-toolbar';
     const DRAWER_SELECTOR = '#persona-management-button .drawer-content';
     const LIST_ID = 'user_avatar_block';
 
-    // 用来识别"用户设定描述"和"插入位置"标题的候选文字（中英文都尝试，取前缀匹配）。
+    // 标题文字候选（中英文都试，取前缀匹配，找最短、最像"标题"的那个元素）。
     const DESC_LABELS = ['用户设定描述', 'Description'];
     const POSITION_LABELS = ['插入位置', 'Injection Position', 'Position'];
+    const GLOBAL_LABELS = ['全局设置', 'Global Persona Settings', 'Global Settings'];
 
     function getState() {
         try {
@@ -45,21 +45,9 @@
         return document.querySelector(DRAWER_SELECTOR);
     }
 
-    // 从 target 往上爬，直到找到一个跟 referenceSibling 同一个父节点的祖先节点，
-    // 也就是跟 referenceSibling 处于"同一层级/同一个区块"的容器。
-    function climbToSiblingLevel(target, referenceSibling) {
-        if (!target || !referenceSibling || !referenceSibling.parentElement) return null;
-        let node = target;
-        const targetParent = referenceSibling.parentElement;
-        let hops = 0;
-        while (node && node.parentElement !== targetParent && hops < 20) {
-            node = node.parentElement;
-            hops++;
-        }
-        return node && node.parentElement === targetParent ? node : null;
-    }
-
-    // 在 root 内找一个"标题元素"：文字很短（<40字符）且以候选文字开头。
+    // 在 root 内找"标题元素"：自身可见文字很短（<40字符）且以候选文字开头。
+    // 用 TreeWalker 按文档顺序遍历，父节点先于子节点被访问到，
+    // 所以拿到的通常就是"这一小段标题所在的最外层容器"。
     function findHeadingElement(root, labels) {
         if (!root) return null;
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
@@ -72,28 +60,34 @@
         return null;
     }
 
-    function findBlocks() {
-        const listBlock = document.getElementById(LIST_ID);
-        if (!listBlock) return { listBlock: null, descBlock: null, positionBlock: null, globalBlocks: [] };
-
-        const drawer = findDrawer();
-        const descHeading = findHeadingElement(drawer, DESC_LABELS);
-        const positionHeading = findHeadingElement(drawer, POSITION_LABELS);
-
-        const descBlock = climbToSiblingLevel(descHeading, listBlock);
-        const positionBlock = climbToSiblingLevel(positionHeading, listBlock);
-
-        let globalBlocks = [];
-        const parent = listBlock.parentElement;
-        if (parent && positionBlock) {
-            const siblings = Array.from(parent.children);
-            const idx = siblings.indexOf(positionBlock);
-            if (idx !== -1) {
-                globalBlocks = siblings.slice(idx + 1).filter(el => el.id !== TOOLBAR_ID);
+    // 从 heading 往上爬，找到第一个"确实包含实际控件"的祖先，作为整个区块。
+    // 最多爬 5 层，避免一路爬到抽屉根节点，把不相关的内容也裹进来。
+    function findBlockForHeading(heading) {
+        if (!heading) return null;
+        let node = heading;
+        for (let i = 0; i < 5 && node.parentElement; i++) {
+            node = node.parentElement;
+            if (node.querySelector('textarea, select, input, button, .menu_button, .checkbox_label')) {
+                return node;
             }
         }
+        return node;
+    }
 
-        return { listBlock, descBlock, positionBlock, globalBlocks };
+    function findBlocks() {
+        const drawer = findDrawer();
+        const listBlock = document.getElementById(LIST_ID);
+
+        const descHeading = findHeadingElement(drawer, DESC_LABELS);
+        const positionHeading = findHeadingElement(drawer, POSITION_LABELS);
+        const globalHeading = findHeadingElement(drawer, GLOBAL_LABELS);
+
+        return {
+            listBlock,
+            descBlock: findBlockForHeading(descHeading),
+            positionBlock: findBlockForHeading(positionHeading),
+            globalBlock: findBlockForHeading(globalHeading),
+        };
     }
 
     function applyCollapse(el, collapsed) {
@@ -102,11 +96,11 @@
     }
 
     function refresh(state) {
-        const { listBlock, descBlock, positionBlock, globalBlocks } = findBlocks();
+        const { listBlock, descBlock, positionBlock, globalBlock } = findBlocks();
         applyCollapse(listBlock, !state.list);
         applyCollapse(descBlock, !state.desc);
         applyCollapse(positionBlock, !state.position);
-        globalBlocks.forEach(el => applyCollapse(el, !state.global));
+        applyCollapse(globalBlock, !state.global);
     }
 
     function makeButton(label, onClick) {
